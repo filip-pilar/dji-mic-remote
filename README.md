@@ -1,6 +1,6 @@
 # DJI Mic Remote
 
-Native macOS menu-bar MVP that maps the DJI Mic Series Mobile Receiver link-button event to a Wispr Flow hands-free shortcut. No audio processing, network requests, Raycast, Kanata, or Nix dependency.
+A small native macOS menu bar app that maps the DJI Mic Series Mobile Receiver link-button event to a Wispr Flow hands-free shortcut. No audio processing, network requests, Raycast, Kanata, or Nix dependency.
 
 ## Build and run
 
@@ -15,17 +15,21 @@ open "build/DJI Mic Remote.app"
 
 The default is **Control–Option–Command (⌃⌥⌘)**. Flow accepted this modifier-only combination in its shortcut settings. Playback from the remote still needs end-to-end validation; the previous Control–Option–F20 shortcut was confirmed working.
 
-1. New installations start with the default. Existing saved shortcuts stay unchanged; click **Reset to default** to switch to Control–Option–Command.
+1. New installations start with the default. Existing saved shortcuts stay unchanged; open **Setup & details… → Reset shortcut** to switch to Control–Option–Command.
 2. In Flow → Settings → Shortcuts, add a shortcut under **Hands-free mode**. Press Control, Option, and Command together on your keyboard, then release them. The mic button is not needed for setup.
 3. Grant Accessibility to DJI Mic Remote and enable it. Ad-hoc rebuilds may require removing and re-adding the permission entry.
 4. Select **Wireless Mic Rx (USB)** as Flow’s microphone.
 5. In a blank document, press the mic button, speak a harmless test phrase, and press again. Confirm Flow starts, stops, and inserts text. The delayed test button also sends the selected shortcut after three seconds.
 
-**Change shortcut** supports Control, Option, Shift, and Command combinations, either alone or with a regular key. To record modifiers alone, press the combination and release all modifiers. To record a regular key combination, hold the modifiers and press the key. Escape or losing window focus cancels. Changing or resetting the shortcut turns the remote off until explicitly re-enabled.
+**Change…** supports Control, Option, Shift, and Command combinations, either alone or with a regular key. To record modifiers alone, press the combination and release all modifiers. To record a regular key combination, hold the modifiers and press the key. Escape or losing window focus cancels. Changing or resetting the shortcut turns the remote off until explicitly re-enabled.
 
 Choose a shortcut that isn’t used by your other apps, and set the same shortcut in Wispr Flow. There is no guarantee a custom combination is conflict-free. Fn/Globe, Caps Lock, and mouse buttons are not supported by this recorder.
 
 The app launches disabled and remembers the shortcut. Keep it at a stable path.
+
+## Interface
+
+The main window contains the enable control, receiver status, selected shortcut, and delayed test. **Setup & details…** opens a separate, nonblocking window for Flow setup, Accessibility, shortcut reset, and activity diagnostics. Closing either window leaves the menu bar app running. No audio is recorded by this app.
 
 ## Architecture
 
@@ -70,3 +74,7 @@ Architecture informed by Igor Bedesqui’s public implementation:
 https://github.com/bdsqqq/dots/tree/main/modules/dji-mic
 
 Our implementation is standalone Swift. His Raycast integration uses Kanata to dispatch shortcuts through a virtual keyboard.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

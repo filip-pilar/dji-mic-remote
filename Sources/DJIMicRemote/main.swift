@@ -20,6 +20,8 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var status: NSStatusItem!
     var panel: NSPanel!
     var statusLabel: NSTextField!
+    var helpPanel: NSPanel!
+    var shortcutLabel: NSTextField!
     var shortcutButton: NSButton!
     var toggle: NSButton!
     var testButton: NSButton!
@@ -47,7 +49,8 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let shortcut, let data = try? JSONEncoder().encode(shortcut) {
                 UserDefaults.standard.set(data, forKey: "shortcut")
             }
-            shortcutButton?.title = "Change shortcut: \(shortcut?.label ?? Shortcut.defaultShortcut.label)…"
+            shortcutButton?.title = "Change…"
+            shortcutLabel?.stringValue = shortcut?.label ?? Shortcut.defaultShortcut.label
         }
     }
 
@@ -74,42 +77,87 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showSettings()
     }
 
-    func buildPanel() {
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 490), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        panel.title = "DJI Mic Remote"
-        panel.delegate = self
-        panel.center()
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 18
+    func text(_ value: String, size: CGFloat = 13, secondary: Bool = false) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: value)
+        label.font = .systemFont(ofSize: size)
+        label.textColor = secondary ? .secondaryLabelColor : .labelColor
+        return label
+    }
+    func column(_ views: [NSView], spacing: CGFloat = 12) -> NSStackView {
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = spacing
+        for view in views { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+        return stack
+    }
+    func row(_ views: [NSView]) -> NSStackView {
+        let stack = NSStackView(views: views); stack.orientation = .horizontal; stack.alignment = .centerY; stack.spacing = 12
+        return stack
+    }
+    func spacer() -> NSView {
+        let view = NSView(); view.setContentHuggingPriority(.defaultLow, for: .horizontal); return view
+    }
+    func card(_ content: NSView) -> NSView {
+        let box = NSBox(); box.boxType = .custom; box.borderType = .lineBorder
+        box.cornerRadius = 12; box.borderWidth = 1; box.borderColor = .separatorColor
+        box.fillColor = .controlBackgroundColor
+        box.contentViewMargins = NSSize(width: 0, height: 0)
+        let host = NSView(); box.contentView = host
+        host.addSubview(content); content.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 18),
+            content.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -18),
+            content.topAnchor.constraint(equalTo: host.topAnchor, constant: 18),
+            content.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -18)
+        ])
+        return box
+    }
+    func install(_ stack: NSStackView, in window: NSWindow) {
         stack.translatesAutoresizingMaskIntoConstraints = false
-        panel.contentView!.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 26), stack.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor, constant: -26), stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 26)])
-        let title = NSTextField(labelWithString: "Your mic. One button.")
-        title.font = .systemFont(ofSize: 24, weight: .semibold)
-        stack.addArrangedSubview(title)
-        let description = NSTextField(wrappingLabelWithString: "Default: Control–Option–Command. Choose a shortcut that isn’t used by your other apps, and set the same shortcut in Wispr Flow’s Hands-free mode.")
-        stack.addArrangedSubview(description)
-        shortcutButton = NSButton(title: "Change shortcut: \(shortcut?.label ?? Shortcut.defaultShortcut.label)…", target: self, action: #selector(recordShortcut))
-        stack.addArrangedSubview(shortcutButton)
-        stack.addArrangedSubview(NSButton(title: "Reset to default", target: self, action: #selector(resetShortcut)))
-        toggle = NSButton(checkboxWithTitle: "Enable mic remote", target: self, action: #selector(toggleEnabled))
-        stack.addArrangedSubview(toggle)
-        testButton = NSButton(title: "Test shortcut in 3 seconds", target: self, action: #selector(testShortcut))
-        stack.addArrangedSubview(testButton)
-        diagnosticLabel = NSTextField(wrappingLabelWithString: "No button events received this session.")
-        diagnosticLabel.font = .systemFont(ofSize: 11)
-        stack.addArrangedSubview(diagnosticLabel)
-        statusLabel = NSTextField(wrappingLabelWithString: "Looking for receiver…")
-        statusLabel.textColor = .secondaryLabelColor
-        stack.addArrangedSubview(statusLabel)
-        let permission = NSButton(title: "Allow Accessibility…", target: self, action: #selector(requestPermission))
-        stack.addArrangedSubview(permission)
-        let hint = NSTextField(wrappingLabelWithString: "Select the DJI microphone in Flow. This app only sends the shortcut; Flow handles your audio and text.")
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .secondaryLabelColor
-        stack.addArrangedSubview(hint)
+        window.contentView!.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: window.contentView!.bottomAnchor, constant: -24)
+        ])
+    }
+    func buildPanel() {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 360), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        panel.title = "DJI Mic Remote"; panel.titlebarAppearsTransparent = true
+        panel.isReleasedWhenClosed = false; panel.delegate = self; panel.center()
+        let title = text("Your mic. One button.", size: 23); title.font = .systemFont(ofSize: 23, weight: .semibold)
+        toggle = NSButton(checkboxWithTitle: "Enable remote", target: self, action: #selector(toggleEnabled))
+        toggle.font = .systemFont(ofSize: 14, weight: .medium)
+        statusLabel = text("Looking for receiver…", size: 12, secondary: true)
+        let connection = card(column([row([toggle, spacer()]), statusLabel], spacing: 10))
+        shortcutLabel = text(shortcut?.label ?? Shortcut.defaultShortcut.label, size: 26)
+        shortcutLabel.font = .monospacedSystemFont(ofSize: 26, weight: .medium)
+        shortcutButton = NSButton(title: "Change…", target: self, action: #selector(recordShortcut))
+        shortcutButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let shortcutHeading = text("Wispr Flow shortcut", size: 12, secondary: true)
+        let shortcuts = card(column([shortcutHeading, row([shortcutLabel, spacer(), shortcutButton])]))
+        testButton = NSButton(title: "Test in 3 seconds", target: self, action: #selector(testShortcut))
+        let help = NSButton(title: "Setup & details…", target: self, action: #selector(showHelp))
+        install(column([title, connection, shortcuts, row([testButton, spacer(), help])], spacing: 18), in: panel)
+
+        helpPanel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 430), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        helpPanel.title = "Setup & Details"; helpPanel.titlebarAppearsTransparent = true
+        helpPanel.isReleasedWhenClosed = false; helpPanel.center()
+        let setup = column([
+            text("Connect to Wispr Flow", size: 19),
+            text("1. Add the shortcut shown in the main window to Flow → Settings → Shortcuts → Hands-free mode."),
+            text("2. Choose your DJI microphone in Flow."),
+            text("3. Allow Accessibility, then enable the remote."),
+            row([NSButton(title: "Accessibility Settings…", target: self, action: #selector(requestPermission)), spacer()])
+        ])
+        diagnosticLabel = text("No button events received this session.", size: 12, secondary: true)
+        install(column([setup, card(column([text("Activity", size: 12, secondary: true), diagnosticLabel])),
+            row([NSButton(title: "Reset shortcut", target: self, action: #selector(resetShortcut)), spacer()]),
+            text("Custom shortcuts may conflict with other apps. This app sends keys only; Flow handles audio and text.", size: 12, secondary: true)
+        ], spacing: 20), in: helpPanel)
+    }
+    @objc func showHelp() {
+        NSApp.activate(ignoringOtherApps: true); helpPanel.makeKeyAndOrderFront(nil)
     }
 
     @objc func showSettings() {
@@ -119,11 +167,13 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func requestPermission() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
     func stopRemote() {
         enabled = false
         toggle.state = .off
         pendingTest?.cancel(); pendingTest = nil
+        testButton?.title = "Test in 3 seconds"
         releaseShortcut()
         clearMapping()
         removeTap()
@@ -142,7 +192,9 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !mapped else { return }
         recordingShortcut = true
         recordedModifiers = []
-        shortcutButton.title = "Press and release shortcut (Esc cancels)…"
+        shortcutButton.title = "Listening…"
+        shortcutLabel.stringValue = "…"
+        statusLabel.stringValue = "Press a shortcut, then release. Escape cancels."
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             if event.type == .keyDown && event.keyCode == 53 { self.finishRecording(); return nil }
@@ -158,7 +210,7 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return event
             }
             guard event.keyCode != sentinelKey, !flags.isEmpty else {
-                self.shortcutButton.title = "Include Command, Option, Control or Shift…"
+                self.statusLabel.stringValue = "Include Control, Option, Shift or Command."
                 return nil
             }
             let keyLabel = event.keyCode == 49 ? "Space" : (event.charactersIgnoringModifiers?.uppercased() ?? "Key \(event.keyCode)")
@@ -186,9 +238,11 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         finishRecording()
         pendingTest?.cancel()
         diagnosticLabel.stringValue = "Switch to a blank text document. Sending in 3 seconds…"
+        testButton.title = "Sending in 3 seconds…"
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingTest = nil
+            self.testButton.title = "Test in 3 seconds"
             self.sendShortcut()
         }
         pendingTest = work
@@ -199,7 +253,8 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         monitor = nil
         recordingShortcut = false
         recordedModifiers = []
-        shortcutButton.title = "Change shortcut: \(shortcut?.label ?? Shortcut.defaultShortcut.label)…"
+        shortcutButton.title = "Change…"
+        shortcutLabel.stringValue = shortcut?.label ?? Shortcut.defaultShortcut.label
     }
     @objc func toggleEnabled() {
         if toggle.state == .on {
