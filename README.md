@@ -1,8 +1,15 @@
 # DJI Mic Remote
 
-Native Swift/AppKit menu-bar app for the DJI receiver button. **Wispr Flow** delivers Flow’s hands-free shortcut. **Local** records the selected microphone, transcribes English with Parakeet on this Mac, saves history, and pastes into the focused editor. Local audio is never uploaded.
+Native macOS menu-bar app that turns the DJI receiver button into dictation control. Choose **Wispr Flow** or **Local · Parakeet**, then press once to start and again to finish.
 
-Agent entry point: read [AGENTS.md](AGENTS.md) for maintenance rules, then use this reference for setup, behavior, and validation.
+| Mode | Transcription | Text delivery and history |
+| --- | --- | --- |
+| **Wispr Flow** | The remote triggers Flow’s existing hands-free shortcut. Flow handles audio and transcription. | Flow handles insertion and keeps its own history. |
+| **Local · Parakeet** | DJI Mic Remote records the selected input and transcribes English on this Mac. Wispr Flow is not required. | Pastes into the focused editor while preserving your clipboard. Includes optional Auto-send, saved transcripts, playback, retranscription, and recovery Paste. |
+
+Local audio is never uploaded. Parakeet runs on Apple Silicon; its verified model downloads on first use or can be bundled for offline setup. **Auto-send** optionally presses Return after Local dictation; it is off by default and never runs during history recovery.
+
+Agent entry point: read [AGENTS.md](AGENTS.md) for maintenance rules. This README covers [building](#build-and-install), [setup](#setup-and-controls), [permissions](#permissions), [delivery](#local-insertion-and-auto-send), [recovery](#history-and-recovery), and [validation](#validation).
 
 ## Build and install
 
@@ -19,7 +26,7 @@ Quit DJI Mic Remote before building. `build.sh` stages the bundle, verifies its 
 
 ## Setup and controls
 
-The app launches paused. Choose an engine and click **Start remote**. When it shows **Ready to dictate**, focus an editor and press the receiver button once to start, once to finish. **Pause remote** disables receiver control.
+The app launches paused. Choose **Wispr Flow** or **Local**, select a microphone for Local, and click **Start remote**. Grant the requested permissions; the same start request continues automatically. When it shows **Ready to dictate**, focus an editor and press the receiver button once to start, once to finish. **Pause remote** disables receiver control.
 
 - **Wispr Flow:** the app reads Flow’s compatible hands-free binding. If offered, **Set up Flow & start** quits Flow, privately backs up its settings, adds a nonconflicting binding, verifies the write, and reopens Flow. Finish Flow’s onboarding and select your DJI audio input in Flow (observed name: `Wireless Mic Rx (USB)`).
 - **Local:** microphone selection and Auto-send stay visible. A connected DJI input is suggested when no input is saved. Choose a microphone if prompted; the same start request continues. Startup checks Accessibility and microphone permission before downloading/loading Parakeet. Preparation is automatic. The model stays warm across pause/resume and later recordings; relaunching loads it again from disk.
