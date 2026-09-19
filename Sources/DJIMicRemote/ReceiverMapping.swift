@@ -76,7 +76,7 @@ final class ReceiverMapping {
     func install() throws {
         guard expected == nil else { throw MappingError(message: "Mapping cleanup is pending. Disable the remote or reconnect the receiver.") }
         let before = try read()
-        guard before.isEmpty else { throw MappingError(message: "Receiver already has a key mapping. Disable the other remapper first.") }
+        guard before.isEmpty else { throw MappingError(message: "Unplug and reconnect your DJI receiver, then try again. A previous session or another app left a button mapping. If it returns, close the other remapper.") }
         // Retain the intended identities even if a write partially succeeds or its
         // read-back fails. Cleanup still requires an exact match before any write.
         expected = before.withSentinel

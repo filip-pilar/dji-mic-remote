@@ -13,9 +13,9 @@ enum FlowSettings {
         var errorDescription: String? {
             switch self {
             case .unreadable: return "Could not read Flow’s settings. Open Flow and finish its setup first."
-            case .incompatible: return "Flow’s settings format is not recognized. Use a custom shortcut in Details."
+            case .incompatible: return "Flow’s settings format is not recognized. Use a custom shortcut in Shortcut settings."
             case .noShortcut: return "Flow needs a compatible hands-free shortcut."
-            case .noFreeBinding: return "Could not add a shortcut without conflicting with Flow’s existing bindings. Use Details."
+            case .noFreeBinding: return "Could not add a shortcut without conflicting with Flow’s existing bindings. Use Shortcut settings."
             case .running: return "Flow is still running. Quit Flow and try setup again."
             case .changed: return "Flow’s settings changed during setup. Nothing else was overwritten; try again."
             }

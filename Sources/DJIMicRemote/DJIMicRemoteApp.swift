@@ -1,9 +1,61 @@
 import AppKit
 import ApplicationServices
+import AVFoundation
 
-final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
+    enum Engine: String { case flow, local }
+    var engine = Engine(rawValue: UserDefaults.standard.string(forKey: "dictationEngine") ?? "flow") ?? .flow
+    let local: LocalDictation
+    init(local: LocalDictation = LocalDictation()) { self.local = local; super.init() }
+    var historyWindow: HistoryWindow?
+    var engineControl: NSSegmentedControl!
+    var localControls: NSStackView!
+    var inputPicker: NSPopUpButton!
+    var autoSendToggle: NSButton!
+    var aboutButton: NSPopUpButton!
+    var historyButton: NSButton!
+    var stateTitle: NSTextField!
+    var progress: NSProgressIndicator!
+    var cancelSetupButton: NSButton!
+    var revealAppButton: NSButton!
+    var permissionActions: NSStackView!
+    var prepareTextTarget: () -> Void = TextDelivery.prepareFocusedApplication
+    enum StartupStage { case idle, local, flow, microphone, microphoneRequest, accessibility }
+    var startupStage: StartupStage = .idle {
+        didSet {
+            if startupStage != .accessibility { accessibilityRecovery = false }
+            if oldValue != startupStage { updatePermissionMonitoring() }
+        }
+    }
+    var startupRequested = false
+    var startupGeneration = 0
+    var startupIssue: String?
+    var accessibilityAllowed: () -> Bool = AXIsProcessTrusted
+    var accessibilityRecovery = false
+    var permissionTimer: Timer?
+    var permissionCheckInterval: TimeInterval = 0.5
+    var microphoneAuthorization: () -> AVAuthorizationStatus = { AVCaptureDevice.authorizationStatus(for: .audio) }
+    var requestMicrophoneAccess: () async -> Bool = { await AVCaptureDevice.requestAccess(for: .audio) }
+    var microphoneTask: Task<Void, Never>?
+    var displayedInputs: [AudioInput]?
+    var installListener: (() -> Bool)?
+    var openAccessibilitySettings: (() -> Void)?
+    var openMicrophoneSettings: (() -> Void)?
+    var dismissPermissionWindows: (() -> Void)?
+    var revealApplication: ((URL) -> Void)?
+    var activationObserver: NSObjectProtocol?
+    deinit { permissionTimer?.invalidate(); savedFeedbackTimer?.invalidate() }
     var status: NSStatusItem!
+    let statusBadge = MenuBarBadge(frame: .zero)
+    var savedFeedbackTimer: Timer?
+    var savedFeedbackDuration: TimeInterval = 1.4
     var popover: NSPopover!
+    let menuFocus = MenuFocus()
+    var menuTarget: TextTarget?
+    var restoreFocusOnClose = true
+    var receiverAction: Task<Void, Never>?
+    var receiverActionID: UUID?
+    var focusObserver: NSObjectProtocol?
     var popoverContent: NSStackView!
     var statusLabel: NSTextField!
     var helpPanel: NSPanel!
@@ -13,11 +65,10 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var layoutScheduled = false
     var shortcutLabel: NSTextField!
     var shortcutButton: NSButton!
-    var toggle: NSButton!
+    var primaryButton: NSButton!
     var testButton: NSButton!
     var diagnosticLabel: NSTextField!
-    var flowLabel: NSTextField!
-    var flowAction: NSButton!
+    var flowActionTitle = "Open Flow"
     var automaticToggle: NSButton!
     var resetButton: NSButton!
     var flowObservers: [NSObjectProtocol] = []
@@ -59,16 +110,25 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if shortcut == nil || shortcut?.directHIDUsage != nil {
             shortcut = .defaultShortcut
         }
-        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        status = NSStatusBar.system.statusItem(withLength: MenuBarIcon.itemWidth)
+        statusBadge.autoresizingMask = [.minXMargin]
+        status.button?.addSubview(statusBadge)
         updateStatusIcon()
         status.button?.target = self
         status.button?.action = #selector(showSettings)
         buildPanel()
+        local.onChange = { [weak self] in self?.refreshControls(); self?.historyWindow?.refresh(showActivity: true); self?.updateStatusIcon() }
+        local.onTranscriptSaved = { [weak self] in self?.showSavedFeedback() }
+        activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in self?.resumeStartup() }
+        focusObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.engine == .local, self.enabled || self.local.pastePending else { return }
+            self.prepareTextTarget()
+        }
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             flowObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 guard let self, let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                       app.bundleIdentifier == FlowSettings.bundleID, !self.configuringFlow else { return }
-                if name == NSWorkspace.didTerminateApplicationNotification && self.automaticFlow { self.stopRemote() }
+                if name == NSWorkspace.didTerminateApplicationNotification && self.engine == .flow && self.automaticFlow { self.stopRemote() }
                 self.refresh()
             })
         }
@@ -137,20 +197,54 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ])
     }
     func buildPanel() {
-        popover = NSPopover(); popover.behavior = .transient
+        popover = NSPopover(); popover.behavior = .transient; popover.delegate = self
         let controller = NSViewController()
         controller.view = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 245))
         popover.contentViewController = controller
         let title = text("DJI Mic Remote", size: 17); title.font = .systemFont(ofSize: 17, weight: .semibold)
-        toggle = NSButton(checkboxWithTitle: "Enable remote", target: self, action: #selector(toggleEnabled))
-        toggle.font = .systemFont(ofSize: 14, weight: .medium)
-        statusLabel = text("Looking for receiver…", size: 12, secondary: true)
-        flowLabel = text("Checking Wispr Flow…", size: 12, secondary: true)
-        flowAction = NSButton(title: "Set up Flow automatically", target: self, action: #selector(resolveFlow))
-        let content = column([title, text("One press to start dictation. One to finish.", size: 12, secondary: true),
-            toggle, statusLabel, flowLabel, flowAction, separator(),
-            row([NSButton(title: "Details…", target: self, action: #selector(showHelp)), spacer(),
-                 NSButton(title: "Quit", target: self, action: #selector(quit))])], spacing: 12)
+        engineControl = NSSegmentedControl(labels: ["Wispr Flow", "Local"], trackingMode: .selectOne, target: self, action: #selector(changeEngine))
+        engineControl.selectedSegment = engine == .flow ? 0 : 1
+        engineControl.setAccessibilityLabel("Dictation engine")
+        stateTitle = text("Remote paused", size: 15); stateTitle.font = .systemFont(ofSize: 15, weight: .semibold)
+        statusLabel = text("", size: 12, secondary: true)
+        progress = NSProgressIndicator(); progress.style = .spinning; progress.controlSize = .small
+        progress.isDisplayedWhenStopped = false
+        progress.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        progress.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        primaryButton = NSButton(title: "Start remote", target: self, action: #selector(primaryAction))
+        primaryButton.bezelStyle = .rounded; primaryButton.controlSize = .large
+        primaryButton.font = .systemFont(ofSize: 14, weight: .semibold)
+        primaryButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        cancelSetupButton = NSButton(title: "Cancel setup", target: self, action: #selector(cancelStartup))
+        cancelSetupButton.isHidden = true
+        revealAppButton = NSButton(title: "Already enabled or missing?", target: self, action: #selector(accessibilityHelp))
+        revealAppButton.isHidden = true
+        for button in [revealAppButton!, cancelSetupButton!] {
+            button.isBordered = false; button.font = .systemFont(ofSize: 12)
+        }
+        permissionActions = row([revealAppButton, spacer(), cancelSetupButton])
+        permissionActions.isHidden = true
+        inputPicker = NSPopUpButton(); inputPicker.target = self; inputPicker.action = #selector(changeInput)
+        inputPicker.setAccessibilityLabel("Recording microphone")
+        inputPicker.toolTip = "Pause the remote to change microphones."
+        autoSendToggle = NSButton(checkboxWithTitle: "Auto-send", target: self, action: #selector(changeAutoSend))
+        autoSendToggle.toolTip = "Press Return after paste is consumed and focus is rechecked. Return may send a message or add a new line. History pastes never auto-send."
+        localControls = column([
+            column([text("Microphone", size: 11, secondary: true), inputPicker], spacing: 4),
+            column([autoSendToggle, text("Press Return after new dictation is inserted.", size: 11, secondary: true)], spacing: 4)
+        ], spacing: 12)
+        aboutButton = NSPopUpButton(frame: .zero, pullsDown: true)
+        aboutButton.addItem(withTitle: "About")
+        aboutButton.addItem(withTitle: "About DJI Mic Remote…")
+        aboutButton.lastItem?.target = self; aboutButton.lastItem?.action = #selector(showAbout)
+        aboutButton.addItem(withTitle: "Licenses…")
+        aboutButton.lastItem?.target = self; aboutButton.lastItem?.action = #selector(showLicenses)
+        aboutButton.controlSize = .small; aboutButton.bezelStyle = .rounded
+        historyButton = NSButton(title: "History…", target: self, action: #selector(showHistory))
+        let content = column([title, engineControl, localControls, separator(),
+            column([row([stateTitle, spacer(), progress]), statusLabel], spacing: 5),
+            primaryButton, permissionActions, separator(),
+            row([historyButton, spacer(), aboutButton, NSButton(title: "Quit", target: self, action: #selector(quit))])], spacing: 14)
         popoverContent = content
         content.translatesAutoresizingMaskIntoConstraints = false
         controller.view.addSubview(content)
@@ -162,7 +256,7 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ])
 
         helpPanel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 400), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        helpPanel.title = "DJI Mic Remote Details"; helpPanel.titlebarAppearsTransparent = true
+        helpPanel.title = "Flow Shortcut Settings"; helpPanel.titlebarAppearsTransparent = true
         helpPanel.isReleasedWhenClosed = false; helpPanel.delegate = self; helpPanel.center()
         automaticToggle = NSButton(checkboxWithTitle: "Follow Flow’s shortcut automatically", target: self, action: #selector(changeFlowMode))
         automaticToggle.state = automaticFlow ? .on : .off
@@ -191,28 +285,42 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         refreshFlow()
     }
     @objc func showHelp() {
-        popover.performClose(nil)
+        if engine == .local { showHistory(); return }
+        closePopover(restoringFocus: false)
         refreshFlow(); fitPanels()
         NSApp.activate(ignoringOtherApps: true); helpPanel.makeKeyAndOrderFront(nil)
     }
 
     @objc func showSettings() {
         if popover.isShown { popover.performClose(nil); return }
-        refresh()
-        guard let button = status.button else { return }
+        local.refreshInputs()
+        resumeStartup(); refresh()
+        guard let button = status?.button else { return }
+        menuTarget = TextDelivery.capture()
+        menuFocus.opened()
+        refreshControls()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+    func closePopover(restoringFocus: Bool) {
+        guard popover?.isShown == true else { return }
+        restoreFocusOnClose = restoringFocus
+        popover.performClose(nil)
+    }
+    func popoverDidClose(_ notification: Notification) {
+        menuFocus.closed(restore: restoreFocusOnClose)
+        restoreFocusOnClose = true
     }
     var flowIsRunning: Bool {
         NSRunningApplication.runningApplications(withBundleIdentifier: FlowSettings.bundleID).contains { !$0.isTerminated }
     }
     func refreshFlow() {
-        guard !configuringFlow else { return }
+        guard engine == .flow, !configuringFlow else { return }
         let previous = flowShortcut
         canConfigureFlow = false
         if NSWorkspace.shared.urlForApplication(withBundleIdentifier: FlowSettings.bundleID) == nil {
             flowShortcut = nil; flowProblem = "Install Wispr Flow to connect your remote."
-            flowAction.title = "Get Wispr Flow"
+            flowActionTitle = "Get Wispr Flow"
         } else {
             do {
                 flowShortcut = try FlowSettings.shortcut(in: FlowSettings.read())
@@ -221,16 +329,12 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 flowShortcut = nil; flowProblem = error.localizedDescription
                 if case FlowSettings.Failure.noShortcut = error { canConfigureFlow = true }
             }
-            flowAction.title = canConfigureFlow ? "Set up Flow (restarts Flow)" : "Open Flow"
+            flowActionTitle = "Open Flow"
         }
         if automaticFlow && enabled && !FlowSettings.sameBinding(previous, flowShortcut) {
             stopRemote()
-            diagnosticLabel.stringValue = "Flow’s shortcut changed. Enable the remote again to use the new binding."
+            diagnosticLabel.stringValue = "Flow’s shortcut changed. Start the remote again to use the new binding."
         }
-        flowLabel.stringValue = automaticFlow
-            ? (flowProblem ?? (flowIsRunning ? "Flow’s shortcut is detected automatically." : "Wispr Flow will open when you enable the remote."))
-            : "Using your custom shortcut. Match it in Flow."
-        flowAction.isHidden = !automaticFlow || flowShortcut != nil
         if !recordingShortcut { shortcutLabel.stringValue = activeShortcut?.label ?? "Not connected" }
         refreshDetails()
     }
@@ -269,13 +373,13 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async { completion(error) }
         }
     }
-    @objc func resolveFlow() {
+    func resolveFlow() {
         guard canConfigureFlow else { openFlow(); return }
         guard !configuringFlow, stopRemote() else { return }
         configuringFlow = true
-        toggle.isEnabled = false; flowAction.isEnabled = false
+        primaryButton.isEnabled = false
         automaticToggle.isEnabled = false; testButton.isEnabled = false
-        flowLabel.stringValue = "Setting up Flow…"
+        refreshControls()
         Task { @MainActor in
             var problem: String?
             var reopen = false
@@ -299,26 +403,48 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 reopen = false
                 _ = try FlowSettings.shortcut(in: FlowSettings.read())
                 self.diagnosticLabel.stringValue = backup == nil
-                    ? "Flow’s existing shortcut is ready. Enable the remote."
-                    : "Added a hands-free binding and restarted Flow. Existing settings were backed up. Enable the remote."
+                    ? "Flow’s existing shortcut is ready."
+                    : "Added a hands-free binding and restarted Flow. Existing settings were backed up."
             } catch { problem = error.localizedDescription }
             if reopen { self.launchFlow { _ in } }
             self.configuringFlow = false
-            self.toggle.isEnabled = true; self.flowAction.isEnabled = true
+            self.primaryButton.isEnabled = true
             self.automaticToggle.isEnabled = true; self.testButton.isEnabled = true
             self.refresh()
-            if let problem { self.statusLabel.stringValue = problem; self.diagnosticLabel.stringValue = problem }
+            if let problem { self.startupIssue = problem; self.diagnosticLabel.stringValue = problem; self.refreshControls() }
+            else { self.startRemote() }
         }
     }
     @objc func requestPermission() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
+        dismissForPermission()
+        if let openAccessibilitySettings { openAccessibilitySettings(); return }
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+    func dismissForPermission() {
+        if let dismissPermissionWindows { dismissPermissionWindows(); return }
+        closePopover(restoringFocus: false)
+        helpPanel?.orderOut(nil)
+    }
+    func revealAppForAccessibility() {
+        dismissForPermission()
+        // Reveal exactly the running bundle, not another copy found by name.
+        let url = Bundle.main.bundleURL
+        if let revealApplication { revealApplication(url); return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+    @objc func accessibilityHelp() {
+        guard startupStage == .accessibility else { return }
+        if accessibilityRecovery { requestPermission() }
+        else { accessibilityRecovery = true; refreshControls() }
     }
     @discardableResult
     func stopRemote() -> Bool {
+        clearSavedFeedback()
+        startupGeneration += 1; startupRequested = false; startupStage = .idle
+        microphoneTask?.cancel(); microphoneTask = nil
+        receiverAction?.cancel(); receiverAction = nil; receiverActionID = nil
+        local.interrupt("Remote stopped. Recording saved in History.")
         enabled = false
-        toggle.state = .off
         pendingTest?.cancel(); pendingTest = nil
         testButton?.title = "Test in 3 seconds"
         emitter.release()
@@ -375,7 +501,7 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if flags.contains(.command) { name += "⌘" }
         shortcut = Shortcut(key: key, flags: UInt64(flags.rawValue), label: name + keyLabel)
         finishRecording()
-        diagnosticLabel.stringValue = "Shortcut saved. Match it in Flow, then enable the remote."
+        diagnosticLabel.stringValue = "Shortcut saved. Match it in Flow, then start the remote."
     }
     func windowWillClose(_ notification: Notification) { finishRecording() }
     func windowDidResignKey(_ notification: Notification) {
@@ -415,33 +541,160 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         shortcutLabel.stringValue = activeShortcut?.label ?? "Not connected"
         refreshDetails()
     }
-    @objc func toggleEnabled() {
-        guard !configuringFlow else { return }
-        if toggle.state == .on {
-            refreshFlow()
-            guard activeShortcut != nil else { toggle.state = .off; statusLabel.stringValue = flowProblem ?? "Record a custom shortcut in Details."; return }
-            if automaticFlow && !flowIsRunning {
-                let generation = eventGeneration
-                statusLabel.stringValue = "Opening Wispr Flow…"
-                launchFlow { [weak self] error in
-                    guard let self, self.eventGeneration == generation, self.toggle.state == .on else { return }
-                    if let error { self.toggle.state = .off; self.statusLabel.stringValue = error.localizedDescription }
-                    else if self.flowIsRunning { self.toggleEnabled() }
-                    else { self.toggle.state = .off; self.statusLabel.stringValue = "Open Flow and try again." }
+    @objc func primaryAction() {
+        if configuringFlow { return }
+        if startupStage == .local || startupStage == .flow || startupStage == .microphoneRequest { cancelStartup(); return }
+        if startupStage == .accessibility {
+            resumeStartup()
+            if startupStage == .accessibility {
+                if accessibilityRecovery { revealAppForAccessibility() }
+                else { requestPermission() }
+            }
+            return
+        }
+        if startupStage == .microphone { resumeStartup(); if startupStage == .microphone { microphonePermission() }; return }
+        if engine == .local, local.pastePending { local.cancelPaste(); refreshControls(); return }
+        if engine == .local, local.recordingID != nil { local.finish(insert: false); return }
+        if engine == .local, local.working { local.interrupt(local.activeID == nil ? "Setup cancelled." : "Transcription cancelled. Recording saved in History."); refreshControls(); return }
+        if engine == .local, local.hasUnsavedHistory { showHistory(); return }
+        if enabled { stopRemote(); startupIssue = nil; refresh(); return }
+        startRemote()
+    }
+    @objc func cancelStartup() { stopRemote(); startupIssue = nil; refresh() }
+    func startRemote() {
+        guard !configuringFlow, !enabled, startupStage == .idle else { return }
+        startupRequested = true; startupIssue = nil
+        if engine == .local {
+            local.refreshInputs()
+            guard local.input != nil else {
+                startupIssue = "Choose the microphone you want to use above."
+                refreshControls(); return
+            }
+            guard checkAccessibility() else { return }
+            if microphoneAuthorization() == .notDetermined {
+                startupStage = .microphoneRequest; refreshControls()
+                let token = startupGeneration
+                microphoneTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let allowed = await self.requestMicrophoneAccess()
+                    guard self.startupRequested, self.startupGeneration == token, self.engine == .local else { return }
+                    self.microphoneTask = nil
+                    if allowed && self.microphoneAuthorization() == .authorized {
+                        self.startupStage = .idle; self.startRemote()
+                    } else {
+                        // A denied prompt should leave one clear next action, not
+                        // immediately open another window behind the system alert.
+                        self.startupStage = .microphone; self.refreshControls()
+                    }
                 }
                 return
             }
-            guard AXIsProcessTrusted() else { toggle.state = .off; requestPermission(); statusLabel.stringValue = "Allow Accessibility, then enable the remote."; return }
-            if mapping.needsCleanup && !clearMapping() { toggle.state = .off; return }
-            guard installTap() else { toggle.state = .off; statusLabel.stringValue = "Could not listen for the button. Check Accessibility permission."; return }
-            eventGeneration += 1; buttonPress.reset()
-            enabled = true
+            if microphoneAuthorization() == .denied || microphoneAuthorization() == .restricted {
+                startupStage = .microphone; refreshControls(); microphonePermission(); return
+            }
+            if !local.ready {
+                startupStage = .local
+                let token = startupGeneration
+                refreshControls()
+                local.prepare { [weak self] success in
+                    guard let self, self.startupRequested, self.startupGeneration == token, self.engine == .local else { return }
+                    self.startupStage = .idle
+                    if success { self.finishStartup() }
+                    else if self.microphoneAuthorization() == .denied || self.microphoneAuthorization() == .restricted {
+                        self.startupStage = .microphone; self.refreshControls()
+                    } else { self.startupRequested = false; self.startupIssue = self.local.message; self.refreshControls() }
+                }
+                return
+            }
         } else {
-            guard stopRemote() else { return }
+            refreshFlow()
+            if activeShortcut == nil {
+                startupRequested = false
+                if canConfigureFlow { resolveFlow() }
+                else { openFlow(); startupIssue = flowProblem ?? "Finish Flow setup, then start the remote."; refreshControls() }
+                return
+            }
+            guard checkAccessibility() else { return }
+            if automaticFlow && !flowIsRunning {
+                startupStage = .flow; let token = startupGeneration; refreshControls()
+                launchFlow { [weak self] error in
+                    guard let self, self.startupRequested, self.startupGeneration == token else { return }
+                    self.startupStage = .idle
+                    if let error { self.startupRequested = false; self.startupIssue = error.localizedDescription; self.refreshControls() }
+                    else if self.flowIsRunning { self.finishStartup() }
+                    else { self.startupRequested = false; self.startupIssue = "Flow did not open. Open it and try again."; self.refreshControls() }
+                }
+                return
+            }
         }
+        finishStartup()
+    }
+    @discardableResult func checkAccessibility() -> Bool {
+        guard accessibilityAllowed() else {
+            let entering = startupStage != .accessibility
+            startupStage = .accessibility; refreshControls()
+            // No AX prompt: macOS can leave it behind Settings, and a removed
+            // entry is not reliably re-registered. The missing-entry action is
+            // always available; passive rechecks never reopen windows.
+            if entering { requestPermission() }
+            return false
+        }
+        return true
+    }
+    func finishStartup() {
+        guard startupRequested else { return }
+        if engine == .local {
+            guard microphoneAuthorization() == .authorized else {
+                startupStage = .microphone; refreshControls(); return
+            }
+            local.refreshInputs()
+            guard local.input != nil else {
+                startupStage = .idle
+                startupIssue = "Your microphone disconnected. Choose a connected microphone above."
+                refreshControls(); return
+            }
+        }
+        guard checkAccessibility() else { return }
+        if mapping.needsCleanup && !clearMapping() { startupRequested = false; refreshControls(); return }
+        guard installListener?() ?? installTap() else {
+            startupRequested = false; startupStage = .idle
+            startupIssue = "Could not listen for the mic button. Check Accessibility access and try again."
+            refreshControls(); return
+        }
+        startupRequested = false; startupStage = .idle
+        eventGeneration += 1; buttonPress.reset(); enabled = true
+        if engine == .local { prepareTextTarget() }
         refresh()
     }
+    func resumeStartup() {
+        guard startupRequested else { return }
+        if startupStage == .accessibility && accessibilityAllowed() {
+            startupStage = .idle; startRemote()
+        } else if startupStage == .microphone && microphoneAuthorization() == .authorized {
+            startupStage = .idle; startRemote()
+        } else if startupStage == .idle && engine == .local && !local.working {
+            local.refreshInputs()
+            if local.input != nil { startRemote() }
+        }
+    }
+    func updatePermissionMonitoring() {
+        permissionTimer?.invalidate(); permissionTimer = nil
+        guard startupRequested, startupStage == .accessibility || startupStage == .microphone else { return }
+        // A menu-bar app may never become active after the user grants access.
+        // Poll only during this explicit start request, including while Settings
+        // or a menu is active. Still-denied checks never reopen Settings;
+        // a grant advances to the next step of the same start request.
+        let timer = Timer(timeInterval: permissionCheckInterval, repeats: true) { [weak self] _ in
+            self?.resumeStartup()
+        }
+        timer.tolerance = permissionCheckInterval / 5
+        permissionTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
     func suspendForReceiverChange() {
+        if local.recordingID != nil || local.activeID != nil || local.pastePending {
+            local.interrupt("Receiver connection changed. Recording saved in History.")
+        }
         receiverSettling = true
         eventGeneration += 1; buttonPress.reset(); emitter.release()
         pendingTest?.cancel(); pendingTest = nil; testButton.title = "Test in 3 seconds"
@@ -453,47 +706,76 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mapping.disconnected()
         } else if mapping.needsCleanup && !clearMapping() {
             // A changed service set must not inherit ownership from the old device.
-            enabled = false; toggle.state = .off; removeTap()
+            enabled = false; removeTap()
             return
         }
         refresh()
     }
     func refresh() {
         refreshFlow()
-        guard !receiverSettling else { statusLabel.stringValue = "Receiver connection changed. Checking…"; return }
+        guard !receiverSettling else { refreshControls(); return }
         if enabled && receiver.connected && !mapped {
             do { try mapping.install() }
             catch {
-                enabled = false; toggle.state = .off; removeTap()
+                enabled = false; removeTap()
                 var message = error.localizedDescription
                 // A failed read-back may still follow a successful write. Attempt
                 // rollback, with the same ownership checks as a normal disable.
                 do { try mapping.clear() }
                 catch { message += " " + error.localizedDescription }
-                statusLabel.stringValue = message
+                startupIssue = message
                 diagnosticLabel.stringValue = message
+                refreshControls()
                 updateStatusIcon()
                 return
             }
         }
-        statusLabel.stringValue = !receiver.connected ? "Connect your DJI Mic Series Mobile Receiver." : (mapped && enabled ? "Ready. Press the receiver button to dictate." : "Receiver connected. Remote is off.")
+        refreshControls()
         updateStatusIcon()
     }
+    var statusPresentation: (badge: MenuBarBadge.State, description: String) {
+        let ready = enabled && mapped && (engine == .flow || local.input != nil)
+        let waitingForPermission = startupRequested && [.accessibility, .microphone, .microphoneRequest].contains(startupStage)
+        if engine == .local && local.recordingID != nil { return (.recording, local.message) }
+        if configuringFlow || startupStage == .flow { return (.working, "Starting Wispr Flow") }
+        if engine == .local && local.working { return (.working, local.message) }
+        if waitingForPermission { return (.attention, "Waiting for permission") }
+        if let startupIssue { return (.attention, startupIssue) }
+        if enabled && !ready { return (.attention, mapped ? "Microphone disconnected" : "Waiting for receiver") }
+        if engine == .local {
+            if local.hasUnsavedHistory || local.history == nil { return (.attention, local.message) }
+            if savedFeedbackTimer != nil { return (.saved, "Transcript saved on this Mac") }
+        }
+        return ready ? (.ready, "Ready to dictate") : (.paused, "Remote paused")
+    }
+    func showSavedFeedback() {
+        guard engine == .local, !local.busy else { return }
+        clearSavedFeedback()
+        let timer = Timer(timeInterval: savedFeedbackDuration, repeats: false) { [weak self] _ in
+            self?.clearSavedFeedback(); self?.updateStatusIcon()
+        }
+        savedFeedbackTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        updateStatusIcon()
+    }
+    func clearSavedFeedback() { savedFeedbackTimer?.invalidate(); savedFeedbackTimer = nil }
     func updateStatusIcon() {
-        guard let button = status.button else { return }
-        let ready = enabled && mapped
-        let state = ready ? "Ready" : (enabled ? "Waiting for receiver" : "Off")
-        button.image = ready ? MenuBarIcon.ready : MenuBarIcon.inactive
-        button.toolTip = "DJI Mic Remote — \(state)"
+        if local.busy || engine != .local || startupRequested { clearSavedFeedback() }
+        guard let button = status?.button else { return }
+        let presentation = statusPresentation
+        status.length = MenuBarIcon.itemWidth
+        MenuBarIcon.apply(to: button, badge: statusBadge, state: presentation.badge)
+        button.toolTip = "DJI Mic Remote — \(presentation.description)"
         button.setAccessibilityLabel("DJI Mic Remote")
-        button.setAccessibilityValue(state)
+        button.setAccessibilityValue(presentation.description)
     }
     @discardableResult
     func clearMapping() -> Bool {
         do { try mapping.clear(); updateStatusIcon(); return true }
         catch {
             diagnosticLabel.stringValue = error.localizedDescription
-            statusLabel.stringValue = error.localizedDescription
+            startupIssue = error.localizedDescription
+            refreshControls()
             updateStatusIcon()
             return false
         }
@@ -508,6 +790,7 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 remote.eventGeneration += 1
                 remote.buttonPress.reset(waitForRelease: true)
                 remote.emitter.release()
+                remote.local.interrupt("Button listener interrupted. Recording saved in History.")
                 if let tap = remote.tap { CGEvent.tapEnable(tap: tap, enable: true) }
                 return Unmanaged.passUnretained(event)
             }
@@ -523,7 +806,7 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     DispatchQueue.main.async {
                         guard remote.enabled, remote.mapped, generation == remote.eventGeneration else { return }
                         remote.buttonPresses += 1
-                        remote.sendShortcut()
+                        remote.handleReceiverPress()
                     }
                 }
                 return nil
@@ -541,12 +824,35 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         tap = nil; source = nil
     }
+    func handleReceiverPress() {
+        guard receiverAction == nil else { return }
+        let actionID = UUID(); receiverActionID = actionID
+        let token = eventGeneration
+        let restoring = popover.isShown
+        if restoring { closePopover(restoringFocus: true) }
+        receiverAction = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.receiverActionID == actionID { self.receiverAction = nil; self.receiverActionID = nil } }
+            // Activation is asynchronous. Let our menu relinquish focus before
+            // capturing the editor or completing dictation into its saved target.
+            if restoring {
+                for _ in 0..<6 {
+                    if NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier { break }
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    guard !Task.isCancelled else { return }
+                }
+            }
+            guard !Task.isCancelled, self.enabled, self.mapped, token == self.eventGeneration else { return }
+            if self.engine == .local { self.local.press() } else { self.sendShortcut() }
+        }
+    }
     func sendShortcut() {
+        guard engine == .flow else { return }
         if automaticFlow {
             let previous = flowShortcut
             refreshFlow()
             guard flowIsRunning, FlowSettings.sameBinding(previous, flowShortcut) else {
-                diagnosticLabel.stringValue = "Flow or its shortcut changed. Check the connection and enable the remote again."
+                diagnosticLabel.stringValue = "Flow or its shortcut changed. Check the connection and start the remote again."
                 stopRemote(); return
             }
         }
@@ -560,8 +866,119 @@ final class Remote: NSObject, NSApplicationDelegate, NSWindowDelegate {
             diagnosticLabel.stringValue = "Could not create shortcut events. No new keys were sent."
         }
     }
+    @objc func changeEngine() {
+        guard !configuringFlow, stopRemote() else { engineControl.selectedSegment = engine == .flow ? 0 : 1; return }
+        startupIssue = nil
+        finishRecording(); helpPanel.orderOut(nil)
+        engine = engineControl.selectedSegment == 0 ? .flow : .local
+        UserDefaults.standard.set(engine.rawValue, forKey: "dictationEngine")
+        local.refreshInputs(); refresh()
+    }
+    func refreshControls() {
+        guard localControls != nil else { return }
+        let isLocal = engine == .local
+        localControls.isHidden = !isLocal
+        historyButton.title = isLocal ? "History…" : "Shortcut settings…"
+        historyButton.action = isLocal ? #selector(showHistory) : #selector(showHelp)
+        engineControl.isEnabled = !configuringFlow && startupStage != .local && startupStage != .flow && startupStage != .microphoneRequest
+        autoSendToggle.state = local.autoSend ? .on : .off
+        autoSendToggle.isEnabled = !local.busy
+        if displayedInputs != local.inputs {
+            displayedInputs = local.inputs
+            inputPicker.removeAllItems(); inputPicker.addItem(withTitle: "Choose microphone…")
+            for input in local.inputs { inputPicker.addItem(withTitle: input.name); inputPicker.lastItem?.representedObject = input.uid }
+        }
+        let inputIndex = local.inputs.firstIndex(where: { $0.uid == local.inputUID }).map { $0 + 1 } ?? 0
+        if inputPicker.indexOfSelectedItem != inputIndex { inputPicker.selectItem(at: inputIndex) }
+        inputPicker.isEnabled = !local.busy && !enabled
+        primaryButton.isEnabled = !configuringFlow
+        cancelSetupButton.isHidden = startupStage != .accessibility && startupStage != .microphone
+        revealAppButton.isHidden = startupStage != .accessibility
+        revealAppButton.title = accessibilityRecovery ? "Open Settings" : "Already enabled or missing?"
+        permissionActions.isHidden = cancelSetupButton.isHidden
+        var title = "Remote paused"
+        var detail = isLocal ? "Private dictation on this Mac. Start the remote to begin." : "Use your mic button to dictate with Wispr Flow."
+        var action = "Start remote"
+        var spinning = false
+        if configuringFlow { title = "Setting up Flow…"; detail = "Adding a shortcut and restarting Flow."; action = "Setting up…"; spinning = true }
+        else if startupStage == .local { title = "Starting local dictation…"; detail = local.message; action = "Cancel setup"; spinning = true }
+        else if startupStage == .flow { title = "Opening Flow…"; detail = "The remote will start automatically."; action = "Cancel setup"; spinning = true }
+        else if startupStage == .microphone { title = "Waiting for microphone access"; detail = "Allow DJI Mic Remote in System Settings. Setup continues automatically when macOS grants access."; action = "Open Microphone Settings" }
+        else if startupStage == .microphoneRequest { title = "Allow microphone access"; detail = "Choose Allow in the macOS prompt to record your microphone."; action = "Cancel setup" }
+        else if startupStage == .accessibility {
+            if accessibilityRecovery {
+                title = "Restore Accessibility access"
+                detail = "If the switch is already on, macOS may still be using an older build’s permission.\n\nIn Accessibility, select DJI Mic Remote and click −. Then click + and add the app shown in Finder. Turn it on.\n\nIf it’s missing, just add it. Setup continues automatically once access works."
+                action = "Show this app in Finder"
+            } else {
+                title = "Waiting for Accessibility"
+                detail = "Turn on DJI Mic Remote in Accessibility. Setup continues automatically when macOS grants access."
+                action = "Open Accessibility Settings"
+            }
+        }
+        else if isLocal && local.recordingID != nil { title = "Recording…"; detail = local.message; action = "Finish & save" }
+        else if isLocal && local.cancelling { title = "Stopping…"; detail = "Finishing the current operation. Nothing will be typed."; action = "Stopping…"; primaryButton.isEnabled = false; spinning = true }
+        else if isLocal && (local.pastePending || local.delivering) { title = "Pasting…"; detail = local.message; action = "Cancel paste"; spinning = true }
+        else if isLocal && local.working && local.activeID == nil { title = "Starting local dictation…"; detail = local.message; action = "Cancel setup"; spinning = true }
+        else if isLocal && local.working { title = "Transcribing…"; detail = "Your recording is saved. Transcribing on this Mac."; action = "Cancel transcription"; spinning = true }
+        else if isLocal && local.hasUnsavedHistory { title = "Save transcript to continue"; detail = "Open History to copy your transcript or retry saving."; action = "Open History…" }
+        else if isLocal && local.history == nil { title = "History unavailable"; detail = local.message; action = "Start remote"; primaryButton.isEnabled = false }
+        else if let issue = startupIssue { title = isLocal && local.input == nil ? "Choose a microphone" : "Needs attention"; detail = issue; action = isLocal && local.input == nil ? "Choose microphone…" : "Try again" }
+        else if enabled {
+            title = mapped ? "Ready to dictate" : "Waiting for receiver"
+            detail = mapped ? "Press the mic button to start. Press again to finish." : "Connect your DJI receiver. The remote will connect automatically."
+            action = "Pause remote"
+            if isLocal && local.input == nil { title = "Microphone disconnected"; detail = "Pause the remote and choose a connected microphone above." }
+        } else if !isLocal && automaticFlow && activeShortcut == nil {
+            title = "Connect Wispr Flow"; detail = flowProblem ?? "Open Flow to finish setting up its hands-free shortcut."
+            action = canConfigureFlow ? "Set up Flow & start" : flowActionTitle
+        } else if isLocal && local.input == nil {
+            title = "Choose a microphone"; detail = "Select an input to start private dictation on this Mac."; action = "Choose microphone…"
+        } else if isLocal && local.ready { detail = "Local dictation is ready. Start the remote to use your mic button." }
+        if receiverSettling && enabled { title = "Checking receiver…" }
+        stateTitle.stringValue = title; statusLabel.stringValue = detail; primaryButton.title = action
+        stateTitle.textColor = local.recordingID != nil && isLocal ? .systemRed : .labelColor
+        if spinning { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+        updateStatusIcon()
+        scheduleLayout()
+    }
+    @objc func changeAutoSend() { local.setAutoSend(autoSendToggle.state == .on); refreshControls() }
+    @objc func changeInput() {
+        local.selectInput(inputPicker.selectedItem?.representedObject as? String)
+        startupIssue = nil
+        if startupRequested { startRemote() } else { refreshControls() }
+    }
+    @objc func microphonePermission() {
+        dismissForPermission()
+        if let openMicrophoneSettings { openMicrophoneSettings(); return }
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+    }
+    @objc func showHistory() {
+        closePopover(restoringFocus: false)
+        if historyWindow == nil { historyWindow = HistoryWindow(local: local) }
+        historyWindow?.pasteTarget = TextDelivery.capture() ?? menuTarget
+        historyWindow?.show()
+    }
+    @objc func showLicenses() {
+        closePopover(restoringFocus: false)
+        NSWorkspace.shared.open(AppResources.root.appendingPathComponent("Licenses"))
+    }
+    @objc func showAbout() {
+        closePopover(restoringFocus: false)
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "DJI Mic Remote"])
+    }
     @objc func quit() { NSApp.terminate(nil) }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard local.hasUnsavedHistory else { return .terminateNow }
+        let alert = NSAlert(); alert.messageText = "Some history could not be saved"
+        alert.informativeText = "Keep the app open to copy the transcript or retry saving. Quitting may lose the unsaved text."
+        alert.addButton(withTitle: "Keep open"); alert.addButton(withTitle: "Quit anyway")
+        return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    }
     func applicationWillTerminate(_ notification: Notification) {
+        if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
+        if let focusObserver { NSWorkspace.shared.notificationCenter.removeObserver(focusObserver) }
         flowObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         stopRemote(); receiver.stop(); finishRecording()
     }
