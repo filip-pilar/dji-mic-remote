@@ -16,6 +16,16 @@ final class ShortcutEmitterTests: XCTestCase {
         XCTAssertEqual(events.count, 4)
     }
 
+    func testPlainReturnPostsBalancedPairWithoutModifiers() {
+        var events: [CGEvent] = []
+        let emitter = ShortcutEmitter(post: { events.append($0) })
+        XCTAssertEqual(emitter.send(Shortcut(key: 36, flags: 0, label: "Return"), heldFlags: []), .sent)
+        emitter.release(); emitter.release()
+        XCTAssertEqual(events.map(\.type), [.keyDown, .keyUp])
+        XCTAssertEqual(events.map { $0.getIntegerValueField(.keyboardEventKeycode) }, [36, 36])
+        XCTAssertTrue(events.allSatisfy { $0.flags.isEmpty })
+    }
+
     func testRegularKeyReleasesBeforeInjectedModifiers() {
         var events: [CGEvent] = []
         let emitter = ShortcutEmitter(post: { events.append($0) })

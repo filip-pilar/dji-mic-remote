@@ -1,0 +1,18 @@
+Clipboard paste implementation references (MIT):
+
+Maccy, Clipboard.swift: session-level Command-V event pair and device-side Command flag.
+https://github.com/p0deje/Maccy/blob/c376789c5d377b7c520b6f6e91f3f3a1aa28640b/Maccy/Clipboard.swift
+License: Maccy-MIT.txt
+
+Handy, macOS paste transaction: lazy clipboard data, read receipts, concealment markers, and guarded restoration.
+https://github.com/cjpais/Handy/blob/8f9cf53cd1410cda26beea39ff802ac306e39585/src-tauri/src/paste_tx/macos.rs
+License: Handy-MIT.txt
+
+OpenWhispr, macOS paste helper: Command-modified keyboard-layout resolution and event spacing.
+https://github.com/OpenWhispr/openwhispr/blob/6d56d75e7e13ec47009e573e9ff4cded0d0ccc61/resources/macos-fast-paste.swift
+License: OpenWhispr-MIT.txt
+
+Additional design reference: Espanso's clipboard backend preserves/restores the clipboard independently of editor introspection. No Espanso code is included.
+https://github.com/espanso/espanso/blob/0cadaeaddf9aeb6d128668ea5db354b7c635ec20/espanso/src/cli/worker/engine/dispatch/executor/clipboard_injector.rs
+
+The Swift implementation preserves every clipboard representation. Clipboard reads and event posting are not proof of insertion; exact field/caret read-back is required for verified success. Opt-in Auto-send can also follow settled clipboard consumption with unchanged focus; it reports Return posting, not confirmed insertion or message delivery.
