@@ -382,4 +382,19 @@ final class TextDeliveryTests: XCTestCase {
         focus.opened(); focus.closed(restore: true)
         XCTAssertEqual(activations, [20]) // No stale previous-app reuse.
     }
+
+    func testOnlyEditableNonsecureTargetsAreAccepted() {
+        XCTAssertTrue(TextDelivery.isEditable(role: kAXTextAreaRole, subrole: nil))
+        XCTAssertFalse(TextDelivery.isEditable(role: kAXTextFieldRole, subrole: kAXSecureTextFieldSubrole))
+        XCTAssertFalse(TextDelivery.isEditable(role: kAXButtonRole, subrole: nil))
+        XCTAssertFalse(TextDelivery.isEditable(role: nil, subrole: nil))
+    }
+
+    func testTargetChangePreventsDelivery() {
+        let element = AXUIElementCreateApplication(123)
+        let target = TextTarget(pid: 123, name: "Fixture", element: element, selection: nil)
+        XCTAssertTrue(TextDelivery.matches(target, current: target))
+        XCTAssertFalse(TextDelivery.matches(target, current: nil))
+        XCTAssertFalse(TextDelivery.matches(target, current: TextTarget(pid: 456, name: "Other", element: element, selection: nil)))
+    }
 }

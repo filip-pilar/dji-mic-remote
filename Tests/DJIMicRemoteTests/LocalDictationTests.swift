@@ -2,38 +2,12 @@ import XCTest
 import ApplicationServices
 @testable import DJIMicRemote
 
-final class FakeRecorder: AudioRecording {
-    var onInterruption: ((String) -> Void)?
-    var stopped = 0
-    var duration = 1.5
-    func start(to url: URL, input: AudioInput) throws { try Data("fixture audio".utf8).write(to: url) }
-    func stop() -> Double { stopped += 1; return duration }
-}
-final class FakeRecognizer: LocalRecognizing {
-    var calls = 0
-    var output = "Hello from the microphone."
-    var failure: Error?
-    var delayed = false
-    var continuation: CheckedContinuation<String, Error>?
-    @MainActor func prepare(progress: @escaping (String) -> Void) async throws { progress("Fixture ready") }
-    @MainActor func transcribe(_ audio: URL) async throws -> String {
-        calls += 1
-        if delayed { return try await withCheckedThrowingContinuation { continuation = $0 } }
-        if let failure { throw failure }
-        return output
-    }
-}
-
 final class LocalDictationTests: XCTestCase {
     var directory: URL!
     override func setUpWithError() throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: directory) }
-    @MainActor func waitUntil(_ condition: @escaping () -> Bool) async throws {
-        for _ in 0..<500 { if condition() { return }; try await Task.sleep(nanoseconds: 2_000_000) }
-        XCTFail("Timed out waiting for fixture operation")
-    }
     @MainActor func configured(_ recognizer: FakeRecognizer = FakeRecognizer(), autoSend: Bool = false) async throws -> LocalDictation {
         let local = LocalDictation(history: try LocalHistory(directory: directory), recognizer: recognizer, recorder: FakeRecorder(), inputs: { [] }, autoSend: autoSend)
         local.listInputs = { [AudioInput(uid: "fixture", name: "Fixture microphone")] }
@@ -199,31 +173,33 @@ final class LocalDictationTests: XCTestCase {
         XCTAssertEqual(local.entries.first?.state, .failed)
         XCTAssertTrue(local.message.contains("No audio reached"))
     }
-    @MainActor func testAutoSendAppliesToNewDictationAndNotTranscriptionRetry() async throws {
-        let local = try await configured(autoSend: true)
-        var options: [Bool] = []
-        local.deliver = { _, _, autoSend in options.append(autoSend); return .init("Fixture delivery") }
-        local.press(); local.press(); try await waitUntil { !local.working }
-        XCTAssertEqual(options, [true])
-        local.retry(try XCTUnwrap(local.entries.first?.id)); try await waitUntil { !local.working }
-        XCTAssertEqual(options, [true])
-    }
-    @MainActor func testPersistBeforeDeliveryAndRetryDoesNotInsert() async throws {
-        let recognizer = FakeRecognizer(); let local = try await configured(recognizer)
-        var delivered = 0
-        local.deliver = { text, _, _ in
-            delivered += 1
-            let recovered = try! LocalHistory(directory: self.directory)
-            XCTAssertEqual(recovered.entries.first?.text, text)
-            XCTAssertEqual(recovered.entries.first?.state, .ready)
+    @MainActor func testNewDictationSavesBeforeAutoSendAndRetryNeverDelivers() async throws {
+        let recognizer = FakeRecognizer()
+        let local = try await configured(recognizer, autoSend: true)
+        var autoSendOptions: [Bool] = []
+        local.deliver = { text, _, autoSend in
+            autoSendOptions.append(autoSend)
+            do {
+                let recovered = try LocalHistory(directory: self.directory)
+                XCTAssertEqual(recovered.entries.first?.text, text)
+                XCTAssertEqual(recovered.entries.first?.state, .ready)
+            } catch {
+                XCTFail("Transcript must be durable before delivery: \(error)")
+            }
             return .init("Fixture delivery")
         }
-        local.press(); let id = try XCTUnwrap(local.recordingID)
-        local.press(); try await waitUntil { !local.working }
-        XCTAssertEqual(delivered, 1); XCTAssertTrue(local.history!.hasAudio(id))
+        local.press()
+        let id = try XCTUnwrap(local.recordingID)
+        local.press()
+        try await waitUntil { !local.working }
+        XCTAssertEqual(autoSendOptions, [true])
+        XCTAssertTrue(local.history!.hasAudio(id))
+
         recognizer.output = "A revised transcript."
-        local.retry(id); try await waitUntil { !local.working }
-        XCTAssertEqual(delivered, 1); XCTAssertEqual(recognizer.calls, 2)
+        local.retry(id)
+        try await waitUntil { !local.working }
+        XCTAssertEqual(autoSendOptions, [true])
+        XCTAssertEqual(recognizer.calls, 2)
         XCTAssertEqual(local.entries.first?.previousTexts, ["Hello from the microphone."])
     }
     @MainActor func testCancelInferenceKeepsAudioAndRejectsLateDelivery() async throws {
@@ -268,79 +244,5 @@ final class LocalDictationTests: XCTestCase {
         try FileManager.default.removeItem(at: metadata)
         local.retry(id)
         XCTAssertFalse(local.needsSaving(id)); XCTAssertEqual(delivered, 0)
-    }
-    func testCrashRecoveryRetentionAndDeletion() throws {
-        let history = try LocalHistory(directory: directory)
-        let old = Transcript(id: UUID(), created: Date().addingTimeInterval(-8 * 86_400))
-        try history.save(old); try Data([1, 2]).write(to: history.audioURL(old.id))
-        let recovered = try LocalHistory(directory: directory)
-        XCTAssertEqual(recovered.entries.first?.state, .interrupted)
-        try recovered.expireAudio()
-        XCTAssertFalse(recovered.hasAudio(old.id)); XCTAssertEqual(recovered.entries.count, 1)
-        let permissions = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
-        XCTAssertEqual(permissions?.intValue, 0o700)
-        try recovered.delete(old.id); XCTAssertTrue(recovered.entries.isEmpty)
-    }
-    func testModelDigestRejectsSameSizeCorruptionAndTraversal() throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("asset"); try Data("abc".utf8).write(to: file)
-        let record = ModelManifest.File(path: "asset", bytes: 3, sha256: try ModelManifest.digest(file))
-        let manifest = ModelManifest(repository: "fixture", revision: "fixed", files: [record])
-        XCTAssertTrue(try manifest.valid(record, in: directory))
-        try Data("xyz".utf8).write(to: file); XCTAssertFalse(try manifest.valid(record, in: directory))
-        XCTAssertFalse(try manifest.valid(.init(path: "../asset", bytes: 3, sha256: record.sha256), in: directory))
-        let bundled = try ModelManifest.bundled()
-        XCTAssertEqual(bundled.revision.count, 40); XCTAssertEqual(bundled.files.count, 15)
-        XCTAssertTrue(bundled.files.allSatisfy { $0.sha256.count == 64 })
-    }
-    func testRetentionKeepsRecentAudioAndAllTranscriptMetadata() throws {
-        let history = try LocalHistory(directory: directory)
-        let now = Date(timeIntervalSince1970: 1_790_000_000)
-        let ages: [TimeInterval] = [0, 7 * 86_400, 7 * 86_400 + 1]
-        for age in ages {
-            var entry = Transcript(id: UUID(), created: now.addingTimeInterval(-age))
-            entry.state = .ready; entry.text = "Keep this transcript"
-            try history.save(entry); try Data([1]).write(to: history.audioURL(entry.id))
-        }
-        try history.expireAudio(now: now)
-        XCTAssertEqual(history.entries.count, 3)
-        for entry in history.entries {
-            XCTAssertEqual(history.hasAudio(entry.id), now.timeIntervalSince(entry.created) <= 7 * 86_400)
-            XCTAssertEqual(try LocalHistory(directory: directory).entry(entry.id)?.text, "Keep this transcript")
-        }
-    }
-    func testHistoryRetainsDiagnosticsAndReadsOlderRecordsWithoutThem() throws {
-        let history = try LocalHistory(directory: directory)
-        var entry = Transcript(id: UUID(), created: Date())
-        entry.state = .ready; entry.text = "Current text"; entry.previousTexts = ["Original text"]
-        entry.targetName = "Fixture editor"; entry.modelRevision = "pinned-fixture-revision"
-        entry.pasteState = .autoSendSkipped; entry.needsInsertionRecovery = true
-        entry.message = "Paste sent, Return skipped"
-        try history.save(entry)
-        let reopened = try LocalHistory(directory: directory)
-        let saved = try XCTUnwrap(reopened.entry(entry.id))
-        XCTAssertEqual(saved, entry)
-        try reopened.save(saved)
-        XCTAssertEqual(try LocalHistory(directory: directory).entry(entry.id), entry)
-
-        var older = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any])
-        for field in ["targetName", "modelRevision", "pasteState", "needsInsertionRecovery"] { older.removeValue(forKey: field) }
-        try JSONSerialization.data(withJSONObject: older).write(to: directory.appendingPathComponent(entry.id.uuidString + ".json"))
-        let compatible = try XCTUnwrap(LocalHistory(directory: directory).entry(entry.id))
-        XCTAssertEqual(compatible.text, entry.text); XCTAssertEqual(compatible.previousTexts, entry.previousTexts)
-        XCTAssertNil(compatible.pasteState); XCTAssertNil(compatible.modelRevision)
-    }
-    func testOnlyEditableNonsecureTargetsAreAccepted() {
-        XCTAssertTrue(TextDelivery.isEditable(role: kAXTextAreaRole, subrole: nil))
-        XCTAssertFalse(TextDelivery.isEditable(role: kAXTextFieldRole, subrole: kAXSecureTextFieldSubrole))
-        XCTAssertFalse(TextDelivery.isEditable(role: kAXButtonRole, subrole: nil))
-        XCTAssertFalse(TextDelivery.isEditable(role: nil, subrole: nil))
-    }
-    func testTargetChangePreventsDelivery() {
-        let element = AXUIElementCreateApplication(123)
-        let target = TextTarget(pid: 123, name: "Fixture", element: element, selection: nil)
-        XCTAssertTrue(TextDelivery.matches(target, current: target))
-        XCTAssertFalse(TextDelivery.matches(target, current: nil))
-        XCTAssertFalse(TextDelivery.matches(target, current: TextTarget(pid: 456, name: "Other", element: element, selection: nil)))
     }
 }

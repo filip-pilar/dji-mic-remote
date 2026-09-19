@@ -61,4 +61,17 @@ final class ModelInstallerTests: XCTestCase {
         do { try await task.value; XCTFail("Cancellation must propagate") } catch is CancellationError {} catch { XCTFail("\(error)") }
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("encoder/weights.bin").path))
     }
+
+    func testModelDigestRejectsSameSizeCorruptionAndTraversal() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("asset"); try Data("abc".utf8).write(to: file)
+        let record = ModelManifest.File(path: "asset", bytes: 3, sha256: try ModelManifest.digest(file))
+        let manifest = ModelManifest(repository: "fixture", revision: "fixed", files: [record])
+        XCTAssertTrue(try manifest.valid(record, in: directory))
+        try Data("xyz".utf8).write(to: file); XCTAssertFalse(try manifest.valid(record, in: directory))
+        XCTAssertFalse(try manifest.valid(.init(path: "../asset", bytes: 3, sha256: record.sha256), in: directory))
+        let bundled = try ModelManifest.bundled()
+        XCTAssertEqual(bundled.revision.count, 40); XCTAssertEqual(bundled.files.count, 15)
+        XCTAssertTrue(bundled.files.allSatisfy { $0.sha256.count == 64 })
+    }
 }

@@ -38,10 +38,6 @@ final class StartupTests: XCTestCase {
         remote.refreshControls()
         return remote
     }
-    @MainActor func waitUntil(_ condition: @escaping () -> Bool) async throws {
-        for _ in 0..<500 { if condition() { return }; try await Task.sleep(nanoseconds: 2_000_000) }
-        XCTFail("Startup fixture timed out")
-    }
     @MainActor func testOneClickPreparesAndStartsWithoutSecondEnable() async throws {
         let recognizer = StartupRecognizer(); let remote = try makeRemote(recognizer)
         XCTAssertEqual(remote.primaryButton.title, "Start remote")

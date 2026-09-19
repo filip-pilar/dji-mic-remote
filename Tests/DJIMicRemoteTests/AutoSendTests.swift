@@ -19,7 +19,7 @@ final class AutoSendTests: XCTestCase {
         let result = await verifier.finish(target: target, proof: InsertionProof(before: before, inserted: "world"), isCurrent: { true })
         XCTAssertEqual(sent, 1); XCTAssertTrue(result.message.contains("Return sent"))
     }
-    @MainActor func testUnverifiableOrUnchangedFieldNeverSends() async {
+    @MainActor func testUnconsumedUnverifiedPasteNeverSends() async {
         var sent = 0
         let verifier = AutoSend(current: { .init(target: self.target) }, read: { _ in self.before }, held: { [] }, pause: {}, pressReturn: { sent += 1; return true })
         _ = await verifier.finish(target: target, proof: nil, isCurrent: { true })
