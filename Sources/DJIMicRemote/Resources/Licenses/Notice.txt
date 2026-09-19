@@ -1,0 +1,11 @@
+DJI Mic Remote uses FluidAudio (Apache-2.0), revision b68f484789d81fda21efbf81e2ca9fcfd9dc22aa.
+https://github.com/FluidInference/FluidAudio
+
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License
+NVIDIA Parakeet Unified EN 0.6B: https://huggingface.co/nvidia/parakeet-unified-en-0.6b
+
+Core ML conversion and INT8 quantization by FluidInference, published as CC BY 4.0.
+https://huggingface.co/FluidInference/parakeet-unified-en-0.6b-coreml
+Conversion revision: 4252711f6f060f9a2f91e5f081a806d7f45eebd8
+DJI Mic Remote selects offline INT8 assets without modifying the weights.
+Both upstream terms and conversion attribution accompany this distribution; the conversion card’s CC BY label does not replace NVIDIA’s upstream terms.
