@@ -1,14 +1,12 @@
 # DJI Mic Remote
 
-Native macOS menu bar app that maps a DJI Mic Series Mobile Receiver button to Wispr Flow hands-free dictation. It detects Flow’s shortcut automatically and sends keyboard events; Flow handles audio and transcription. No network client or external package dependencies.
+Native Swift/AppKit menu-bar app for the DJI receiver button. **Wispr Flow** delivers Flow’s hands-free shortcut. **Local** records the selected microphone, transcribes English with Parakeet on this Mac, saves history, and pastes into the focused editor. Local audio is never uploaded.
 
-Agents receiving this repository link: use the setup below to install/configure the app. Read [AGENTS.md](AGENTS.md) before changing code.
+Agent entry point: read [AGENTS.md](AGENTS.md) for maintenance rules, then use this reference for setup, behavior, and validation.
 
-## Requirements and setup
+## Build and install
 
-- macOS 13+, Xcode Command Line Tools (`xcode-select -p`, `swift --version`).
-- DJI Mic Series Mobile Receiver: USB vendor `11427`, product `16401`. Other receivers/firmware are unverified.
-- Wispr Flow installed for the intended dictation workflow.
+Requirements: macOS 14+, Swift 6.2+ / Xcode Command Line Tools. Local inference requires Apple Silicon and roughly 614 MB of model assets plus runtime memory. The supported receiver identity is DJI USB vendor `11427`, product `16401`; other receivers/firmware are unverified. Wispr Flow is required only for Flow mode.
 
 ```sh
 git clone https://github.com/filip-pilar/dji-mic-remote.git
@@ -17,49 +15,121 @@ bash build.sh
 open "build/DJI Mic Remote.app"
 ```
 
-The script creates an ad-hoc-signed app. Keep it at a stable path; rebuilding may require removing/re-adding its Accessibility permission. There is no installer, notarization, auto-update, or launch-at-login integration.
+Quit DJI Mic Remote before building. `build.sh` stages the bundle, verifies its signature, and refuses to replace a running app. Keep the install at a stable path. Builds use `SIGNING_IDENTITY`, the configured local identity, or ad-hoc signing when neither exists. Ad-hoc rebuilds can invalidate privacy grants; see [signing](#signing-and-permission-identity). There is no notarization, auto-update, or launch-at-login integration.
 
-1. Click the wireless-mic icon. Controls open directly beneath it. Flow’s existing compatible hands-free shortcut is detected automatically; no manual matching is needed.
-2. If offered, use **Set up Flow (restarts Flow)**. This quits Flow normally, backs up its settings, adds an unused compatible hands-free binding, verifies the saved file, and reopens Flow. Existing bindings remain. Finish Flow’s own onboarding first.
-3. Choose the DJI audio input in Flow (observed name: `Wireless Mic Rx (USB)`).
-4. Grant DJI Mic Remote Accessibility access, then enable the remote. It launches disabled. Enabling opens Flow in the background if needed.
-5. In a blank document, press the receiver button, speak, press again, and verify Flow inserts the text. The app's “Sent” diagnostic only confirms event posting.
+## Setup and controls
 
-**Details…** contains diagnostics and **Test in 3 seconds**, which posts the selected shortcut after a delay; **Cancel test** cancels a pending test. For manual compatibility, turn off **Follow Flow’s shortcut automatically**, then use **Change…** to record Control/Option/Shift/Command alone or with a regular key; match that binding in Flow. Release all modifiers to save a modifier-only combination. **Cancel recording**, Escape, or loss of focus cancels. Fn/Globe, right-side modifier bindings, Caps Lock, mouse buttons, and F18 are not automatically emitted. Setup can add a separate compatible binding while keeping these bindings intact. Changing/resetting a shortcut or switching modes disables the remote. Existing saved custom shortcuts are retained. Closing the popover/details leaves the app running; use Quit to exit.
+The app launches paused. Choose an engine and click **Start remote**. When it shows **Ready to dictate**, focus an editor and press the receiver button once to start, once to finish. **Pause remote** disables receiver control.
 
-## Flow integration
+- **Wispr Flow:** the app reads Flow’s compatible hands-free binding. If offered, **Set up Flow & start** quits Flow, privately backs up its settings, adds a nonconflicting binding, verifies the write, and reopens Flow. Finish Flow’s onboarding and select your DJI audio input in Flow (observed name: `Wireless Mic Rx (USB)`).
+- **Local:** microphone selection and Auto-send stay visible. A connected DJI input is suggested when no input is saved. Choose a microphone if prompted; the same start request continues. Startup checks Accessibility and microphone permission before downloading/loading Parakeet. Preparation is automatic. The model stays warm across pause/resume and later recordings; relaunching loads it again from disk.
+- **History…:** Local transcripts, delivery details, Copy, recovery Paste, playback, and retry. The main panel/icon show current readiness; a blocking save failure shows **Open History…**.
+- **Shortcut settings…:** Flow’s binding, diagnostics, and optional manual recording. Disable **Follow Flow’s shortcut automatically** to record a custom binding, then match it in Flow. Changing/resetting shortcuts or switching engines pauses the remote. **Test in 3 seconds** emits a Flow shortcut for manual testing; **Cancel test** cancels it.
+- **About → Licenses…:** bundled model, dependency, and paste implementation notices. **Quit** exits; closing panels leaves the app running.
 
-`FlowSettings.swift` reads only shortcut fields from `~/Library/Application Support/Wispr Flow/config.json`: `prefs.user.shortcuts` maps macOS keycode combinations to actions; `popo` means hands-free. Its cached `prefs.cache.splitKeybinds` must agree. This private format was inspected in installed Flow **1.6.827**, not a supported public settings API. Missing/unrecognized settings fail closed; manual mode remains available in Details. The app rechecks settings on opening controls, enabling, and before delivery. A changed/unreadable binding or Flow quitting disables automatic mode’s remote delivery and requires re-enabling.
+Pause before changing microphones. A missing saved device is never silently replaced. **Finish & save** in the Local menu transcribes to History without inserting; finishing with the receiver button uses normal insertion. Recording is limited to five minutes.
 
-Automatic setup runs only from the explicit setup button, with Flow stopped. It adds at most one nonconflicting binding (preferring `⌃⌥⌘`, then combinations using F20), preserves other settings and the four-binding limit, checks for concurrent changes before writing, writes atomically, and reads back. Backups are private files under `~/Library/Application Support/DJI Mic Remote/Flow Backups/`. If recovery is needed, quit Flow and restore the appropriate backup before reopening it. Do not edit Flow’s store concurrently; there is no cross-process transaction with Flow. Normal automatic detection never writes Flow’s settings.
+The menu-bar slot is always 36 points wide. Its outlined wireless microphone stays consistent: red dot = recording, centered ring = work in progress, amber = permission/connection/unsaved-history issue, brief green check = transcript saved locally. The check does not prove insertion. Paused dims the mark; Reduce Motion disables ring animation.
 
-The installed Flow also handles `wispr-flow://start-hands-free` and `wispr-flow://stop-hands-free`. Its handler has no corresponding toggle/status operation; blindly alternating links would lose synchronization when dictation stops elsewhere. The app uses Flow’s own hands-free shortcut to let Flow determine start versus stop.
+## Permissions
 
-## Runtime and recovery
+Accessibility Settings opens directly after the app’s panels close; the app does not also request an AX system alert. Enable DJI Mic Remote, or add it with **+** if absent. **Already enabled or missing?** explains recovery; **Show this app in Finder** reveals the running bundle. If access remains denied despite an enabled entry, remove that stale entry with **−**, add the current bundle with **+**, and enable it. Toggling an old entry does not repair a changed code identity.
 
-- `Sources/DJIMicRemote/DJIMicRemoteApp.swift`: direct menu bar popover, optional custom shortcut recording/persistence, event tap, and lifecycle coordination.
-- `FlowSettings.swift`: strict automatic binding detection and backed-up, conflict-aware offline setup.
-- `ReceiverMonitor.swift`: IOKit arrival/removal callbacks; no polling timer and no exclusive device access.
-- `ReceiverMapping.swift`: strict mapping parser, installation/read-back, and cleanup ownership by registry service ID.
-- `ButtonPress.swift`: press/release state and monotonic debounce.
-- `ShortcutEmitter.swift`: complete key/modifier sequences, delayed release, and cancellation.
-- `MenuBarIcon.swift`: native vector wireless-mic template. A filled mic means Ready; an outline means inactive. The tooltip and accessibility value distinguish Off, Waiting for receiver, and Ready.
-- Receiver-scoped Consumer Volume Up (`0xC000000E9`) maps to F18 (`0x70000006D`, keycode `79`). A session event tap consumes it and posts the shortcut with a 120 ms press and 350 ms debounce. Receiver arrival/removal notifications replace the two-second polling loop. A held button triggers once until released, even if repeated downs lack the autorepeat flag.
-- F18 is reserved globally while active. Hold-to-talk is unsupported. Already-held modifiers are preserved; a fully held modifier-only shortcut must be released before triggering. Every down and release event is allocated before posting, and disable/disconnect/quit releases any pending chord. Event-tap recovery waits for a button release before accepting another press.
-- Existing nonempty mappings and unreadable mapping output block setup. Disable Computah's DJI control and other remappers first. Installation must read back the exact expected mapping before becoming Ready. Cleanup re-reads the mapping and only clears an exact match on the same registry services, then verifies removal. Changed/unreadable mappings are left untouched and reported. Concurrent remappers remain unsupported: hidutil read/write operations are not atomic.
-- Normal disable/quit removes the mapping. After a crash, force quit, or failed cleanup, reconnect the receiver. Do not reset mappings for all keyboards.
-- “Ready” requires receiver detection and successful setup; failed delivery usually needs Accessibility to be refreshed or the Flow shortcut to be matched.
+An explicit start request watches for permission grants even with the menu closed and continues automatically. Passive checks never reopen Settings. **Cancel setup**, engine changes, or quitting prevent late enablement and stop the watcher. Microphone denial leaves an explicit Settings action instead of immediately opening another window. Flow and History retranscription do not request microphone permission.
+
+## Local insertion and Auto-send
+
+Opening/closing the popover restores only the editor it displaced. Deliberate app switches and opening History/Settings take precedence. A receiver press closes the popover and allows focus to return before capturing or using the target.
+
+Delivery saves the transcript first, then checks the captured app/window/field and available selection. Secure Input, protected/read-only fields, changed targets, and held modifiers block delivery. Opaque editors need not expose AX text. [Electron’s AXManualAccessibility opt-in](https://www.electronjs.org/docs/latest/tutorial/accessibility#within-third-party-software) prepares supported editors; initial target capture retries briefly within the original app.
+
+The shared paste implementation:
+
+1. Snapshots every clipboard item/type. If a representation cannot be preserved, or another copy arrives during the snapshot, it leaves the clipboard untouched.
+2. Publishes temporary, transient/concealed text and posts one balanced Command–V pair using the active keyboard layout. It never writes `AXSelectedText`, which can acknowledge a write without inserting text.
+3. Restores the original clipboard after consumption settles, with a three-second wait bound. A newer user copy is never overwritten. Restoration is independent of editor read-back.
+4. Reports **Inserted** only for exact text/caret read-back; otherwise it reports **Paste sent**. Clipboard consumption and key posting are not proof of insertion. There is no automatic second paste.
+
+Pinned upstream references and MIT notices are bundled in [Resources/Licenses](Sources/DJIMicRemote/Resources/Licenses/PasteReferences.txt): Maccy event delivery, Handy clipboard transactions, and OpenWhispr keyboard-layout resolution. No extra package is required.
+
+**Auto-send** is saved, Local-only, and off by default. New dictation attempts one plain Return after clipboard consumption settles for 350 ms or exact AX read-back confirms insertion. After restoration it waits another 200 ms and rechecks destination, available caret, cancellation, and hardware modifiers. Unreadable text contents alone do not block it. The result is **Paste and Return sent**, not confirmed message delivery; Return may submit or add a newline depending on the editor. History pastes/retries never auto-send; Flow retains its own behavior.
+
+Missing AX field/window/caret readings get a bounded retry, up to three seconds before Return. They do not trigger early clipboard restoration. Actual destination changes, protected controls, edits, cancellation, held modifiers, or absent paste-consumption/verification stop Auto-send. History distinguishes these reasons. The synthetic Command–V is excluded from held-modifier checks; only hardware state is used.
+
+## History and recovery
+
+History is one scrolling list of selectable transcript cards. Long text expands in place. Each card offers **Copy**, **Paste to [app]** when an editor is remembered, **Play/Stop**, and **More → Transcribe again / Retry saving / Delete**. Previous text versions remain selectable. Delivery details belong to their transcript.
+
+Recovery Paste returns to the editor focused before opening the DJI UI, rechecks focus/caret, and pastes once without a countdown or Return. If the destination changed, use Copy and normal ⌘V. Retrying transcription automatically loads the model if needed, preserves prior text, clears the old delivery outcome on successful recognition, and never inserts automatically. Flow history stays in Flow.
+
+Data lives in `~/Library/Application Support/DJI Mic Remote/History/`: directory mode 0700, audio/metadata mode 0600, atomic JSON writes. Audio older than seven days expires at launch, before recording, and during hourly idle cleanup; text remains until deleted. Delete removes audio and all transcript versions. Interrupted sessions can be retried, though damaged/incomplete audio may be unrecoverable. Save failures retain text in memory for Copy/Retry saving, block automatic delivery, and warn before quitting. Keep the app open until unsaved text is recovered.
+
+Disable, disconnect, engine/input changes, event-tap interruption, and quit cancel pending work and preserve recoverable audio. Core ML cancellation can wait for an inference call to finish, but its late result cannot trigger insertion. Local does not provide Flow’s rewriting, multilingual recognition, or spoken “press Enter” commands.
+
+## Signing and permission identity
+
+macOS grants access to a code-signing requirement, not merely an app name/path. Reuse an existing Apple identity with `SIGNING_IDENTITY="certificate name or SHA-1" bash build.sh` and optional `SIGNING_KEYCHAIN`. Without one, this explicit, one-time command creates a persistent personal development identity:
+
+```sh
+python3 scripts/setup-local-signing.py
+```
+
+Agents must obtain approval before running it: it creates a private key/keychain, preserves and extends the user keychain search list, and adds user-domain trust restricted to code signing by `/usr/bin/codesign`. It does not change SSL/system trust, Gatekeeper, or TCC grants. Files stay private under `~/Library/Application Support/DJI Mic Remote/Signing/`, outside Git. Configured signing failures stop the build rather than silently switching to ad-hoc. Migration from ad-hoc signing needs the Accessibility entry replaced once as described above. Do not distribute the personal identity or treat self-signing as Developer ID/notarization. [Apple: stable code identity](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
+
+## Model packaging
+
+`Package.resolved` pins FluidAudio to `b68f484789d81fda21efbf81e2ca9fcfd9dc22aa`; optional traits are disabled. [ModelManifest.json](Sources/DJIMicRemote/Resources/ModelManifest.json) pins the Core ML conversion revision and every offline INT8 asset’s size/SHA-256. Downloads use revision URLs and verify before installation; inference never uses the SDK’s unpinned downloader. Verified files survive cancellation.
+
+The default build downloads on first Local start or History retry into `~/Library/Application Support/DJI Mic Remote/Models/<revision>/`. To bundle already downloaded assets for offline use:
+
+```sh
+PARAKEET_MODEL_DIR="/absolute/path/to/verified-model-directory" bash build.sh
+```
+
+Python 3 is required for packaging. The script verifies every file before copying. Weights never enter Git. A damaged bundled model fails closed. Preserve FluidAudio’s Apache-2.0 license, dependency notices, NVIDIA Open Model License/Notice, and the conversion’s CC BY 4.0 attribution; the conversion license does not replace NVIDIA’s terms.
+
+## Runtime map and troubleshooting
+
+All source paths below are under `Sources/DJIMicRemote/`.
+
+| Files | Responsibility |
+| --- | --- |
+| `DJIMicRemoteApp.swift`, `MenuFocus.swift` | Native controls, permissions/startup, engine routing, focus restoration |
+| `LocalDictation.swift`, `LocalHistory.swift`, `HistoryWindow.swift` | Recording lifecycle, durable history, retries, recovery UI |
+| `AudioCapture.swift` | UID-selected AVCaptureSession, serial PCM writing, interruption handling |
+| `ModelAssets.swift` | Pinned downloads, checksums, warm Parakeet inference |
+| `TextDelivery.swift`, `ClipboardPaste.swift`, `AutoSend.swift` | Target guards, clipboard preservation, read-back, optional Return |
+| `FlowSettings.swift`, `ShortcutEmitter.swift` | Flow bindings/setup and balanced key emission |
+| `ReceiverMonitor.swift`, `ReceiverMapping.swift`, `ButtonPress.swift` | Device events, owned HID mapping, press/release/debounce |
+| `MenuBarIcon.swift` | Fixed-width microphone and state badge |
+
+Flow’s private settings schema was inspected in version 1.6.827: `~/Library/Application Support/Wispr Flow/config.json`, `prefs.user.shortcuts` maps keycode combinations to actions (`popo` = hands-free), and `prefs.cache.splitKeybinds` must agree. Unknown/inconsistent schemas fail closed; use Shortcut settings for manual bindings. Setup adds at most one nonconflicting binding, preserves the four-binding limit and unrelated settings, checks for concurrent writes, and verifies read-back. Private backups live under `~/Library/Application Support/DJI Mic Remote/Flow Backups/`; quit Flow before restoring one. Normal detection never writes settings. Fn/Globe, right-side modifiers, Caps Lock, mouse buttons, and F18 are unsupported for automatic shortcut emission. Release all modifiers to finish recording a modifier-only binding; Escape or focus loss cancels.
+
+Receiver Consumer Volume Up (`0xC000000E9`) maps to F18 (`0x70000006D`, keycode 79). F18 is reserved globally while active. Held presses trigger once; Flow emission uses a 120 ms press and 350 ms debounce. Hold-to-talk is unsupported. Modifiers already held by the user are preserved. Device detection is event-driven, and tap recovery waits for release.
+
+Existing nonempty/unreadable HID mappings block setup. Close other receiver remappers; installation and cleanup require exact read-back and matching registry service IDs. Changed mappings are left untouched. Concurrent remappers remain unsupported because hidutil reads/writes are not atomic. After a crash or failed cleanup, reconnect the receiver; never reset mappings for every keyboard.
+
+Audio capture never switches the system-default microphone. PCM format comes from the first buffer, and stop drains/closes the file before recognition. Device loss, capture errors, and format changes save audio without delivery. No audio within five seconds interrupts recording. Metadata-only diagnostics use log subsystem `com.phil.dji-mic-remote`, categories `AudioCapture` and `TextDelivery`; never log transcript contents.
 
 ## Validation
 
 ```sh
 bash build.sh
 swift test
-codesign --verify --strict "build/DJI Mic Remote.app"
+codesign --verify --deep --strict "build/DJI Mic Remote.app"
 ```
 
-SwiftPM tests cover mapping formats/ownership/read-back failures, device identity changes, button hold/bounce/recovery, shortcut ordering, modifier preservation, cancellation, allocation failures, saved-shortcut compatibility, and Flow settings parsing/setup/backup/concurrent-change guards. Mapping commands and event posting are replaced by test doubles; Flow setup tests use temporary fixtures. Tests do not remap devices, send keys, or edit real Flow settings. There is no CI.
+Tests use fake recording/recognition, target capture, keyboard posting, and mapping commands; Flow settings use temporary fixtures. They do not remap hardware, post real keys, or edit user settings. There is no CI.
 
-Historical hardware validation confirmed Control–Option–F20 through Flow. Automatic detection was checked against the installed Flow configuration; its existing `⌃⌥⌘` binding required no write. The setup writer was tested on fixtures, not by changing the user’s working Flow settings. Permission behavior, modifier-only delivery, arrival/removal, reconnect, and button-holding behavior still require a physical end-to-end check. Build/parser success does not establish those results. For changes to shortcut emission, verify record/cancel/reset, delayed delivery, physical button start/stop, and cleanup with the real receiver and Flow.
+Optional offscreen UI and real-model validation use explicit fixtures only:
 
-MIT: [LICENSE](LICENSE). Architecture reference: [bdsqqq/dots DJI module](https://github.com/bdsqqq/dots/tree/main/modules/dji-mic); this is a standalone Swift implementation.
+```sh
+say -o /tmp/dji-fixture.aiff 'Testing the wireless microphone. This recording stays on my computer.'
+DJI_MODEL_SMOKE_DIR="/absolute/path/to/verified-model-directory" \
+DJI_MODEL_SMOKE_AUDIO=/tmp/dji-fixture.aiff \
+DJI_UI_SNAPSHOT_DIR=/tmp/dji-ui swift test
+```
+
+The model fixture expects “microphone” and “recording”; optional checks skip without their environment variables. Generated speech validates inference, not real microphone quality. Physical receiver start/stop, permissions, reconnect, held buttons, Flow delivery, and cross-app insertion require observed manual checks; a passing build/test suite does not establish those results.
+
+MIT: [LICENSE](LICENSE). Original architecture reference: [bdsqqq/dots DJI module](https://github.com/bdsqqq/dots/tree/main/modules/dji-mic).
