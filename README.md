@@ -101,7 +101,10 @@ All source paths below are under `Sources/DJIMicRemote/`.
 
 | Files | Responsibility |
 | --- | --- |
-| `DJIMicRemoteApp.swift`, `MenuFocus.swift` | Native controls, permissions/startup, engine routing, focus restoration |
+| `DJIMicRemoteApp.swift`, `Remote.swift` | App entry point, shared controller state, lifecycle, engine switching |
+| `RemoteUI.swift`, `MenuFocus.swift` | Native panels, state presentation, focus restoration |
+| `RemoteStartup.swift` | Start/stop coordination, permission requests and grant monitoring |
+| `RemoteFlow.swift`, `RemoteReceiver.swift` | Flow setup/shortcut controls, receiver event routing |
 | `LocalDictation.swift`, `LocalHistory.swift`, `HistoryWindow.swift` | Recording lifecycle, durable history, retries, recovery UI |
 | `AudioCapture.swift` | UID-selected AVCaptureSession, serial PCM writing, interruption handling |
 | `ModelAssets.swift` | Pinned downloads, checksums, warm Parakeet inference |
@@ -126,7 +129,7 @@ swift test
 codesign --verify --deep --strict "build/DJI Mic Remote.app"
 ```
 
-Tests use fake recording/recognition, target capture, keyboard posting, and mapping commands; Flow settings use temporary fixtures. They do not remap hardware, post real keys, or edit user settings. There is no CI.
+Tests are grouped by component, with shared recording/recognition fakes and an async wait helper in `Tests/DJIMicRemoteTests/TestSupport.swift`. They use fake target capture, keyboard posting, and mapping commands; Flow settings use temporary fixtures. They do not remap hardware, post real keys, or edit user settings. There is no CI.
 
 Optional offscreen UI and real-model validation use explicit fixtures only:
 
